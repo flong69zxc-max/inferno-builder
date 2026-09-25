@@ -55,15 +55,42 @@ jobs:
       - name: Apply FS patches
         run: bash scripts/fs-patch.sh
 
-      - name: Download Apple SEP ROM
+      - name: Download Apple SEP ROM (Cebu B1)
         run: |
           cd InfernoData
-          # AppleSEPROM-Cebu-B1 — SecureROM/SEP ROM дамп для t8030 (iPhone 11)
-          # Доступен на securerom.fun, имя файла должно содержать "Cebu B1"
-          wget -q -O AppleSEPROM-Cebu-B1 \
-            "https://securerom.fun/downloads/t8030/AppleSEPROM-Cebu-B1" \
-            || echo "⚠️ SEP ROM нужно скачать вручную с https://securerom.fun"
-          echo "✅ SEP ROM готов"
+          echo "📥 Скачиваем AppleSEPROM-Cebu-B1 для t8030 (iPhone 11)..."
+
+          # securerom.fun отдаёт файлы через JS-интерфейс, прямых ссылок нет.
+          # Пробуем несколько возможных путей + эмулируем браузер.
+          SEP_ROM_URLS=(
+            "https://securerom.fun/resources/SEPROM/AppleSEPROM-Cebu-B1"
+            "https://securerom.fun/resources/SEPROM/AppleSEPROM-Cebu-B1.bin"
+            "https://securerom.fun/resources/SEPROM/AppleSEPROM-Cebu-B1.img4"
+            "https://securerom.fun/resources/SEPROM/AppleSEPROM-Cebu-B1.rom"
+          )
+
+          DOWNLOADED=0
+          for url in "${SEP_ROM_URLS[@]}"; do
+            echo "🔍 Пробуем: $url"
+            if curl -L --fail --retry 2 --retry-delay 3 \
+              -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+              -H "Referer: https://securerom.fun/" \
+              -o AppleSEPROM-Cebu-B1 "$url" 2>/dev/null; then
+              # Проверяем, что скачался реальный файл (а не HTML-ошибка)
+              if [ -s AppleSEPROM-Cebu-B1 ] && ! file AppleSEPROM-Cebu-B1 | grep -qi "html"; then
+                echo "✅ SEP ROM скачан: $(du -h AppleSEPROM-Cebu-B1 | cut -f1)"
+                DOWNLOADED=1
+                break
+              fi
+            fi
+          done
+
+          if [ "$DOWNLOADED" -eq 0 ]; then
+            echo "⚠️ Не удалось скачать SEP ROM автоматически."
+            echo "Скачай вручную с https://securerom.fun и положи как InfernoData/AppleSEPROM-Cebu-B1"
+            # Не роняем сборку — артефакт всё равно соберётся, но без SEP ROM
+            touch AppleSEPROM-Cebu-B1.missing
+          fi
 
       - name: Download SEP Firmware
         run: |
@@ -95,6 +122,8 @@ jobs:
         run: |
           zip -r InfernoData.zip InfernoData
           echo "📦 Размер архива: $(du -h InfernoData.zip | cut -f1)"
+          # Проверяем, что SEP ROM внутри
+          unzip -l InfernoData.zip | grep -i "AppleSEPROM" || echo "⚠️ AppleSEPROM не найден в архиве"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
