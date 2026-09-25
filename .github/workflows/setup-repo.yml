@@ -1,0 +1,161 @@
+name: Setup Repository Structure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create directory structure
+        run: |
+          mkdir -p scripts
+          mkdir -p .github/workflows
+
+      - name: Create create-disks.sh
+        run: |
+          cat > scripts/create-disks.sh << 'SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          QEMU_IMG="${QEMU_IMG:-./Inferno/build/qemu-img}"
+
+          mkdir -p InfernoData
+          cd InfernoData
+
+          "$QEMU_IMG" create -f raw root 32G
+          "$QEMU_IMG" create -f raw firmware 8M
+          "$QEMU_IMG" create -f raw syscfg 128K
+          "$QEMU_IMG" create -f raw ctrl_bits 8K
+          "$QEMU_IMG" create -f raw nvram 8K
+          "$QEMU_IMG" create -f raw effaceable 4K
+          "$QEMU_IMG" create -f raw panic_log 1M
+          "$QEMU_IMG" create -f raw sep_nvram 64K
+          "$QEMU_IMG" create -f raw sep_ssc 128K
+          SCRIPT_EOF
+          chmod +x scripts/create-disks.sh
+
+      - name: Create fetch-ipsw.sh
+        run: |
+          cat > scripts/fetch-ipsw.sh << 'SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          IPSW_URL="${IPSW_URL:-https://updates.cdn-apple.com/2020SummerSeed/fullrestores/001-35886/5FE9BE2E-17F8-41C8-96BB-B76E2B225888/iPhone11,8,iPhone12,1_14.0_18A5351d_Restore.ipsw}"
+          IPSW_NAME=$(basename "$IPSW_URL")
+
+          cd InfernoData
+          wget -O "$IPSW_NAME" "$IPSW_URL"
+          mkdir -p Restore
+          unzip -o "$IPSW_NAME" -d Restore
+          rm "$IPSW_NAME"
+          SCRIPT_EOF
+          chmod +x scripts/fetch-ipsw.sh
+
+      - name: Create make-apticket.sh
+        run: |
+          cat > scripts/make-apticket.sh << 'SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          DEVICE="${DEVICE:-n104ap}"
+          cd InfernoData
+
+          pip3 install --quiet pyasn1 pyasn1-modules
+          wget -q -O create_apticket.py \
+            "https://git.chefkiss.dev/AppleHax/InfernoTools/raw/branch/master/create_apticket.py"
+
+          python3 create_apticket.py "$DEVICE" Restore/BuildManifest.plist \
+            <(wget -q -O - "https://git.chefkiss.dev/AppleHax/InfernoTools/raw/branch/master/ticket.shsh2") \
+            root_ticket.der
+          SCRIPT_EOF
+          chmod +x scripts/make-apticket.sh
+
+      - name: Create fs-patch.sh
+        run: |
+          cat > scripts/fs-patch.sh << 'SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          cd InfernoData
+
+          hdiutil attach -imagekey diskimage-class=CRawDiskImage \
+            -blocksize 4096 -noverify -noautofsck root
+
+          sudo diskutil enableownership /Volumes/System
+          sudo mount -urw /Volumes/System
+
+          git clone --depth 1 https://git.chefkiss.dev/AppleHax/InfernoFSPatcher
+          cd InfernoFSPatcher
+          cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=YES \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+          sudo build/inferno_fs_patcher \
+            /Volumes/System/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e
+
+          cd ..
+          diskutil eject /Volumes/System
+          SCRIPT_EOF
+          chmod +x scripts/fs-patch.sh
+
+      - name: Create build-emulator.sh
+        run: |
+          cat > scripts/build-emulator.sh << 'SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          cd InfernoData
+          git clone --depth 1 https://github.com/ChefKissInc/Inferno
+          cd Inferno
+          git submodule update --init
+
+          mkdir -p build && cd build
+          LIBTOOL="glibtool" ../configure \
+            --target-list=aarch64-softmmu,x86_64-softmmu \
+            --disable-bsd-user --disable-guest-agent \
+            --enable-lzfse --enable-slirp --enable-capstone \
+            --enable-curses --enable-libssh --enable-virtfs \
+            --enable-zstd --enable-cocoa --enable-nettle \
+            --enable-gnutls --disable-sdl --disable-gtk \
+            --disable-werror --disable-tests --disable-plugins
+          make -j$(sysctl -n hw.ncpu)
+          SCRIPT_EOF
+          chmod +x scripts/build-emulator.sh
+
+      - name: Create README
+        run: |
+          cat > README.md << 'EOF'
+          # InfernoData Builder
+
+          Автоматическая сборка `InfernoData.zip` для эмулятора Inferno.
+
+          ## Запуск
+
+          1. Actions → Build InfernoData → Run workflow
+          2. Дождаться завершения (~30-40 мин)
+          3. Скачать `InfernoData.zip` из Artifacts
+
+          ## Скрипты
+
+          - `scripts/create-disks.sh` — создание образов дисков
+          - `scripts/fetch-ipsw.sh` — загрузка и распаковка IPSW
+          - `scripts/make-apticket.sh` — создание AP Ticket
+          - `scripts/fs-patch.sh` — патч файловой системы
+          - `scripts/build-emulator.sh` — сборка эмулятора
+          EOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Add InfernoData builder scripts and workflow" || echo "Nothing to commit"
+          git push
