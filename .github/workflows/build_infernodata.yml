@@ -28,7 +28,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      # 1. КЭШ HOMEBREW
       - name: Cache Homebrew packages
         uses: actions/cache@v4
         with:
@@ -43,9 +42,8 @@ jobs:
         run: |
           brew install libtool meson ninja pkgconf dtc glib \
             gnutls jpeg-turbo libpng libslirp libssh libusb lzo ncurses \
-            pixman snappy vde zstd libtasn1 cmake wget nettle lzfse
+            pixman snappy vde zstd libtasn1 cmake wget nettle lzfse openssl
 
-      # 2. КЭШ СБОРКИ INFERNO
       - name: Cache Inferno build
         uses: actions/cache@v4
         id: cache-inferno
@@ -55,8 +53,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-inferno-build-
 
-      # 3. СБОРКА ЭМУЛЯТОРА (только если нет в кэше)
-      # Флаги взяты из актуального гайда ChefKiss (host-setup.mdx)
       - name: Build emulator
         if: steps.cache-inferno.outputs.cache-hit != 'true'
         run: |
@@ -79,7 +75,6 @@ jobs:
             --disable-werror --disable-qom-cast-debug
           make -j$(sysctl -n hw.ncpu)
 
-      # 4. СОЗДАНИЕ ДИСКОВ (команды из file-setup.mdx)
       - name: Create disks
         run: |
           mkdir -p InfernoData
@@ -96,7 +91,6 @@ jobs:
           "$QEMU_IMG" create -f raw sep_nvram 64K
           "$QEMU_IMG" create -f raw sep_ssc 128K
 
-      # 5. ЗАГРУЗКА IPSW
       - name: Fetch IPSW
         run: |
           cd InfernoData
@@ -108,7 +102,7 @@ jobs:
           unzip -q -o "$IPSW_NAME" -d Restore
           rm "$IPSW_NAME"
 
-      # 6. СОЗДАНИЕ AP TICKET (исправленный вызов с явными путями)
+      # 🔽 ИСПРАВЛЕННЫЙ ШАГ: правильный синтаксис вызова create_apticket.py
       - name: Create AP Ticket
         run: |
           cd InfernoData
@@ -119,19 +113,25 @@ jobs:
           wget -q -O ticket.shsh2 \
             "https://git.chefkiss.dev/AppleHax/InfernoTools/raw/branch/master/ticket.shsh2"
 
+          # Проверка наличия обязательных файлов
           if [ ! -f "Restore/BuildManifest.plist" ]; then
             echo "❌ BuildManifest.plist не найден!"
             exit 1
           fi
+          if [ ! -f "ticket.shsh2" ]; then
+            echo "❌ ticket.shsh2 не скачан!"
+            exit 1
+          fi
 
-          python3 create_apticket.py "${{ inputs.device }}" \
-            "Restore/BuildManifest.plist" \
-            "ticket.shsh2" \
-            "root_ticket.der"
+          # Вызов строго по документации ChefKiss:
+          # python3 ./create_apticket.py <model> <BuildManifest.plist> <ticket.shsh2> <root_ticket.der>
+          python3 ./create_apticket.py "${{ inputs.device }}" \
+            ./Restore/BuildManifest.plist \
+            ./ticket.shsh2 \
+            ./root_ticket.der
 
           echo "✅ APTicket создан: $(ls -la root_ticket.der)"
 
-      # 7. ПАТЧ ФАЙЛОВОЙ СИСТЕМЫ (команды из fs-patches.mdx)
       - name: Apply FS patches
         run: |
           cd InfernoData
@@ -154,7 +154,6 @@ jobs:
           cd ..
           diskutil eject /Volumes/System
 
-      # 8. ЗАГРУЗКА SEP ROM (Cebu B1) — файл ищется на securerom.fun
       - name: Download Apple SEP ROM (Cebu B1)
         run: |
           cd InfernoData
@@ -187,12 +186,11 @@ jobs:
             touch AppleSEPROM-Cebu-B1.missing
           fi
 
-      # 9. ПОДГОТОВКА SEP FIRMWARE (извлечение + создание sep ticket + персонализация)
       - name: Prepare SEP Firmware
         run: |
           cd InfernoData
 
-          # 9.1 Извлекаем sep-firmware из IPSW
+          # Извлекаем sep-firmware из IPSW
           SEP_FW=$(find Restore -name "sep-firmware*.im4p" | head -n 1)
           if [ -z "$SEP_FW" ]; then
             echo "❌ sep-firmware не найден в Restore!"
@@ -201,38 +199,39 @@ jobs:
           cp "$SEP_FW" sep-firmware.im4p
           echo "✅ SEP firmware извлечён: $SEP_FW"
 
-          # 9.2 Скачиваем create_septicket.py
+          # Скачиваем create_septicket.py
           wget -q -O create_septicket.py \
             "https://git.chefkiss.dev/AppleHax/InfernoTools/raw/branch/master/create_septicket.py"
 
-          # 9.3 Создаём SEP ticket
-          python3 create_septicket.py "${{ inputs.device }}" \
-            "Restore/BuildManifest.plist" \
-            "ticket.shsh2" \
-            "sep_ticket.der"
+          # Создаём SEP ticket
+          python3 ./create_septicket.py "${{ inputs.device }}" \
+            ./Restore/BuildManifest.plist \
+            ./ticket.shsh2 \
+            ./sep_root_ticket.der
 
-          echo "✅ SEP ticket создан: $(ls -la sep_ticket.der)"
+          echo "✅ SEP ticket создан: $(ls -la sep_root_ticket.der)"
 
-          # 9.4 Собираем img4lib для персонализации
+          # Собираем img4lib (с флагами для macOS arm64)
           git clone --depth 1 https://github.com/xerub/img4lib
-          cd img4lib && make
+          cd img4lib
+          make LDFLAGS="-L/opt/homebrew/opt/openssl/lib -L/opt/homebrew/opt/lzfse/lib" \
+               CFLAGS='-I/opt/homebrew/opt/openssl/include -I/opt/homebrew/opt/lzfse/include -Wall -W -pedantic -Wno-variadic-macros -Wno-multichar -Wno-four-char-constants -Wno-unused-parameter -O2 -I. -g -DiOS10 -DDER_MULTIBYTE_TAGS=1 -DDER_TAG_SIZE=8 -D__unused="__attribute__((unused))"'
           cd ..
 
-          # 9.5 Персонализируем SEP firmware (если есть sep_ticket)
-          if [ -f sep_ticket.der ]; then
+          # Персонализируем SEP firmware (если есть sep_root_ticket)
+          if [ -f sep_root_ticket.der ]; then
             ./img4lib/img4 -A -F \
-              -o sep-firmware.personalized.im4p \
+              -o sep-firmware.n104.RELEASE.new.img4 \
               -i sep-firmware.im4p \
-              -M sep_ticket.der \
+              -M sep_root_ticket.der \
               -T rsep 2>/dev/null || echo "⚠️ Персонализация SEP firmware не удалась"
           fi
 
-      # 10. ОЧИСТКА И УПАКОВКА
       - name: Cleanup and package
         run: |
           cd InfernoData
 
-          # Удаляем ненужные для рантайма файлы (большой dmg, исходники)
+          # Удаляем ненужные для рантайма файлы
           find Restore -name "*.dmg" -size +1G -delete 2>/dev/null || true
           rm -rf InfernoFSPatcher img4lib create_apticket.py create_septicket.py
 
@@ -242,9 +241,8 @@ jobs:
 
           # Проверяем наличие ключевых файлов
           echo "--- Содержимое архива (ключевые файлы) ---"
-          unzip -l InfernoData.zip | grep -E "AppleSEPROM|root_ticket|sep_ticket|sep-firmware" || true
+          unzip -l InfernoData.zip | grep -E "AppleSEPROM|root_ticket|sep_root_ticket|sep-firmware" || true
 
-      # 11. АРТЕФАКТ
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
