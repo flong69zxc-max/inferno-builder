@@ -18,7 +18,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +34,28 @@ jobs:
         run: |
           brew install libtool meson ninja pkgconf capstone dtc glib \
             gnutls jpeg-turbo libpng libslirp libssh libusb lzo ncurses \
-            pixman snappy vde zstd libtasn1 cmake wget
+            pixman snappy vde zstd libtasn1 cmake wget nettle
+
+      - name: Build emulator
+        run: |
+          git clone --depth 1 https://github.com/ChefKissInc/Inferno
+          cd Inferno
+          git submodule update --init --recursive
+
+          mkdir -p build && cd build
+          PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/opt/nettle/lib/pkgconfig" \
+          LIBTOOL="glibtool" ../configure \
+            --target-list=aarch64-softmmu,x86_64-softmmu \
+            --disable-bsd-user --disable-guest-agent \
+            --enable-lzfse --enable-slirp --enable-capstone \
+            --enable-curses --enable-libssh --enable-virtfs \
+            --enable-zstd --extra-cflags=-DNCURSES_WIDECHAR=1 \
+            --disable-sdl --disable-gtk --enable-cocoa \
+            --enable-nettle --enable-gnutls \
+            --extra-cflags="-I$(brew --prefix)/include" \
+            --extra-ldflags="-L$(brew --prefix)/lib" \
+            --disable-werror
+          make -j$(sysctl -n hw.ncpu)
 
       - name: Create disks
         run: bash scripts/create-disks.sh
@@ -49,9 +70,6 @@ jobs:
         env:
           DEVICE: ${{ inputs.device }}
 
-      - name: Build emulator
-        run: bash scripts/build-emulator.sh
-
       - name: Apply FS patches
         run: bash scripts/fs-patch.sh
 
@@ -60,8 +78,6 @@ jobs:
           cd InfernoData
           echo "📥 Скачиваем AppleSEPROM-Cebu-B1 для t8030 (iPhone 11)..."
 
-          # securerom.fun отдаёт файлы через JS-интерфейс, прямых ссылок нет.
-          # Пробуем несколько возможных путей + эмулируем браузер.
           SEP_ROM_URLS=(
             "https://securerom.fun/resources/SEPROM/AppleSEPROM-Cebu-B1"
             "https://securerom.fun/resources/SEPROM/AppleSEPROM-Cebu-B1.bin"
@@ -76,7 +92,6 @@ jobs:
               -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
               -H "Referer: https://securerom.fun/" \
               -o AppleSEPROM-Cebu-B1 "$url" 2>/dev/null; then
-              # Проверяем, что скачался реальный файл (а не HTML-ошибка)
               if [ -s AppleSEPROM-Cebu-B1 ] && ! file AppleSEPROM-Cebu-B1 | grep -qi "html"; then
                 echo "✅ SEP ROM скачан: $(du -h AppleSEPROM-Cebu-B1 | cut -f1)"
                 DOWNLOADED=1
@@ -87,18 +102,14 @@ jobs:
 
           if [ "$DOWNLOADED" -eq 0 ]; then
             echo "⚠️ Не удалось скачать SEP ROM автоматически."
-            echo "Скачай вручную с https://securerom.fun и положи как InfernoData/AppleSEPROM-Cebu-B1"
-            # Не роняем сборку — артефакт всё равно соберётся, но без SEP ROM
             touch AppleSEPROM-Cebu-B1.missing
           fi
 
       - name: Download SEP Firmware
         run: |
           cd InfernoData
-          # Извлекаем SEP firmware из Restore
           cp Restore/Firmware/all_flash/sep-firmware.n104.RELEASE.im4p \
             sep-firmware.n104.RELEASE.im4p 2>/dev/null || true
-          # Если есть img4lib — персонализируем
           if [ -f sep-firmware.n104.RELEASE.im4p ]; then
             git clone --depth 1 https://github.com/xerub/img4lib
             cd img4lib && make
@@ -112,17 +123,13 @@ jobs:
       - name: Cleanup unnecessary files
         run: |
           cd InfernoData
-          # Удаляем самый большой dmg (основной образ ОС) для экономии места
           find Restore -name "*.dmg" -size +1G -delete 2>/dev/null || true
-          # Удаляем ненужные исходники
           rm -rf InfernoFSPatcher img4lib create_apticket.py
-          # Оставляем только нужное для запуска
 
       - name: Create InfernoData.zip
         run: |
           zip -r InfernoData.zip InfernoData
           echo "📦 Размер архива: $(du -h InfernoData.zip | cut -f1)"
-          # Проверяем, что SEP ROM внутри
           unzip -l InfernoData.zip | grep -i "AppleSEPROM" || echo "⚠️ AppleSEPROM не найден в архиве"
 
       - name: Upload artifact
