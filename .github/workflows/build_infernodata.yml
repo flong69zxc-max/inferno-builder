@@ -1,0 +1,112 @@
+name: Build InfernoData
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Device (e.g. n104ap for iPhone 11)"
+        default: "n104ap"
+        required: true
+      ios_version:
+        description: "iOS version (e.g. 14.0)"
+        default: "14.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          brew install libtool meson ninja pkgconf capstone dtc glib \
+            gnutls jpeg-turbo libpng libslirp libssh libusb lzo ncurses \
+            pixman snappy vde zstd libtasn1 cmake wget
+
+      - name: Create disks
+        run: bash scripts/create-disks.sh
+
+      - name: Fetch IPSW
+        run: bash scripts/fetch-ipsw.sh
+        env:
+          IPSW_URL: "https://updates.cdn-apple.com/2020SummerSeed/fullrestores/001-35886/5FE9BE2E-17F8-41C8-96BB-B76E2B225888/iPhone11,8,iPhone12,1_14.0_18A5351d_Restore.ipsw"
+
+      - name: Create AP Ticket
+        run: bash scripts/make-apticket.sh
+        env:
+          DEVICE: ${{ inputs.device }}
+
+      - name: Build emulator
+        run: bash scripts/build-emulator.sh
+
+      - name: Apply FS patches
+        run: bash scripts/fs-patch.sh
+
+      - name: Download Apple SEP ROM
+        run: |
+          cd InfernoData
+          # AppleSEPROM-Cebu-B1 — SecureROM/SEP ROM дамп для t8030 (iPhone 11)
+          # Доступен на securerom.fun, имя файла должно содержать "Cebu B1"
+          wget -q -O AppleSEPROM-Cebu-B1 \
+            "https://securerom.fun/downloads/t8030/AppleSEPROM-Cebu-B1" \
+            || echo "⚠️ SEP ROM нужно скачать вручную с https://securerom.fun"
+          echo "✅ SEP ROM готов"
+
+      - name: Download SEP Firmware
+        run: |
+          cd InfernoData
+          # Извлекаем SEP firmware из Restore
+          cp Restore/Firmware/all_flash/sep-firmware.n104.RELEASE.im4p \
+            sep-firmware.n104.RELEASE.im4p 2>/dev/null || true
+          # Если есть img4lib — персонализируем
+          if [ -f sep-firmware.n104.RELEASE.im4p ]; then
+            git clone --depth 1 https://github.com/xerub/img4lib
+            cd img4lib && make
+            cd ..
+            ./img4lib/img4 -A -F \
+              -o ./sep-firmware.n104.RELEASE.new.img4 \
+              -i ./sep-firmware.n104.RELEASE.im4p \
+              -M ./root_ticket.der -T rsep 2>/dev/null || true
+          fi
+
+      - name: Cleanup unnecessary files
+        run: |
+          cd InfernoData
+          # Удаляем самый большой dmg (основной образ ОС) для экономии места
+          find Restore -name "*.dmg" -size +1G -delete 2>/dev/null || true
+          # Удаляем ненужные исходники
+          rm -rf InfernoFSPatcher img4lib create_apticket.py
+          # Оставляем только нужное для запуска
+
+      - name: Create InfernoData.zip
+        run: |
+          zip -r InfernoData.zip InfernoData
+          echo "📦 Размер архива: $(du -h InfernoData.zip | cut -f1)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: InfernoData-${{ inputs.ios_version }}
+          path: InfernoData.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: InfernoData.zip
+          generate_release_notes: true
