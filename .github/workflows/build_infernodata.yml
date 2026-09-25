@@ -22,21 +22,42 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
+      # 1. КЭШ HOMEBREW (ускоряет установку зависимостей)
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            /opt/homebrew/Cellar
+          key: ${{ runner.os }}-homebrew-${{ hashFiles('**/Brewfile') }}
+          restore-keys: |
+            ${{ runner.os }}-homebrew-
+
       - name: Install dependencies
         run: |
           brew install libtool meson ninja pkgconf capstone dtc glib \
             gnutls jpeg-turbo libpng libslirp libssh libusb lzo ncurses \
-            pixman snappy vde zstd libtasn1 cmake wget nettle
+            pixman snappy vde zstd libtasn1 cmake wget nettle lzfse
 
+      # 2. КЭШ СБОРКИ ЭМУЛЯТОРА (ускоряет повторные запуски)
+      - name: Cache Inferno build
+        uses: actions/cache@v4
+        id: cache-inferno
+        with:
+          path: Inferno/build
+          key: ${{ runner.os }}-inferno-build-${{ hashFiles('**/Inferno/configure') }}
+          restore-keys: |
+            ${{ runner.os }}-inferno-build-
+
+      # 3. СБОРКА ЭМУЛЯТОРА (если нет в кэше)
       - name: Build emulator
+        if: steps.cache-inferno.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 https://github.com/ChefKissInc/Inferno
           cd Inferno
@@ -46,33 +67,80 @@ jobs:
           PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/opt/nettle/lib/pkgconfig" \
           LIBTOOL="glibtool" ../configure \
             --target-list=aarch64-softmmu,x86_64-softmmu \
-            --disable-bsd-user --disable-guest-agent \
-            --enable-lzfse --enable-slirp --enable-capstone \
-            --enable-curses --enable-libssh --enable-virtfs \
-            --enable-zstd --extra-cflags=-DNCURSES_WIDECHAR=1 \
-            --disable-sdl --disable-gtk --enable-cocoa \
-            --enable-nettle --enable-gnutls \
-            --extra-cflags="-I$(brew --prefix)/include" \
-            --extra-ldflags="-L$(brew --prefix)/lib" \
-            --disable-werror
+            --disable-guest-agent --enable-lzfse --enable-slirp --enable-capstone \
+            --enable-curses --enable-libssh --enable-virtfs --enable-zstd \
+            --extra-cflags=-DNCURSES_WIDECHAR=1 --disable-sdl --disable-gtk \
+            --enable-cocoa --enable-nettle --enable-gnutls \
+            --extra-cflags="-I/opt/homebrew/include -O3 -ffast-math" \
+            --extra-ldflags="-L/opt/homebrew/lib" \
+            --disable-werror --disable-tests --disable-qom-cast-debug --disable-plugins
           make -j$(sysctl -n hw.ncpu)
 
+      # 4. СОЗДАНИЕ ДИСКОВ
       - name: Create disks
-        run: bash scripts/create-disks.sh
+        run: |
+          mkdir -p InfernoData
+          cd InfernoData
+          QEMU_IMG="../Inferno/build/qemu-img"
 
+          "$QEMU_IMG" create -f raw root 32G
+          "$QEMU_IMG" create -f raw firmware 8M
+          "$QEMU_IMG" create -f raw syscfg 128K
+          "$QEMU_IMG" create -f raw ctrl_bits 8K
+          "$QEMU_IMG" create -f raw nvram 8K
+          "$QEMU_IMG" create -f raw effaceable 4K
+          "$QEMU_IMG" create -f raw panic_log 1M
+          "$QEMU_IMG" create -f raw sep_nvram 64K
+          "$QEMU_IMG" create -f raw sep_ssc 128K
+
+      # 5. ЗАГРУЗКА IPSW
       - name: Fetch IPSW
-        run: bash scripts/fetch-ipsw.sh
-        env:
-          IPSW_URL: "https://updates.cdn-apple.com/2020SummerSeed/fullrestores/001-35886/5FE9BE2E-17F8-41C8-96BB-B76E2B225888/iPhone11,8,iPhone12,1_14.0_18A5351d_Restore.ipsw"
+        run: |
+          cd InfernoData
+          IPSW_URL="https://updates.cdn-apple.com/2020SummerSeed/fullrestores/001-35886/5FE9BE2E-17F8-41C8-96BB-B76E2B225888/iPhone11,8,iPhone12,1_14.0_18A5351d_Restore.ipsw"
+          IPSW_NAME=$(basename "$IPSW_URL")
 
+          wget -q -O "$IPSW_NAME" "$IPSW_URL"
+          mkdir -p Restore
+          unzip -q -o "$IPSW_NAME" -d Restore
+          rm "$IPSW_NAME"
+
+      # 6. СОЗДАНИЕ APTICKET
       - name: Create AP Ticket
-        run: bash scripts/make-apticket.sh
-        env:
-          DEVICE: ${{ inputs.device }}
+        run: |
+          cd InfernoData
+          pip3 install --quiet pyasn1 pyasn1-modules
+          wget -q -O create_apticket.py \
+            "https://git.chefkiss.dev/AppleHax/InfernoTools/raw/branch/master/create_apticket.py"
 
+          python3 create_apticket.py "${{ inputs.device }}" Restore/BuildManifest.plist \
+            <(wget -q -O - "https://git.chefkiss.dev/AppleHax/InfernoTools/raw/branch/master/ticket.shsh2") \
+            root_ticket.der
+
+      # 7. ПАТЧ ФАЙЛОВОЙ СИСТЕМЫ
       - name: Apply FS patches
-        run: bash scripts/fs-patch.sh
+        run: |
+          cd InfernoData
 
+          hdiutil attach -imagekey diskimage-class=CRawDiskImage \
+            -blocksize 4096 -noverify -noautofsck root
+
+          sudo diskutil enableownership /Volumes/System
+          sudo mount -urw /Volumes/System
+
+          git clone --depth 1 https://git.chefkiss.dev/AppleHax/InfernoFSPatcher
+          cd InfernoFSPatcher
+          cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=YES \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+          sudo build/inferno_fs_patcher \
+            /Volumes/System/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e
+
+          cd ..
+          diskutil eject /Volumes/System
+
+      # 8. ЗАГРУЗКА SEP ROM (Cebu B1)
       - name: Download Apple SEP ROM (Cebu B1)
         run: |
           cd InfernoData
@@ -105,6 +173,7 @@ jobs:
             touch AppleSEPROM-Cebu-B1.missing
           fi
 
+      # 9. SEP FIRMWARE
       - name: Download SEP Firmware
         run: |
           cd InfernoData
@@ -120,18 +189,19 @@ jobs:
               -M ./root_ticket.der -T rsep 2>/dev/null || true
           fi
 
-      - name: Cleanup unnecessary files
+      # 10. ОЧИСТКА И УПАКОВКА
+      - name: Cleanup and package
         run: |
           cd InfernoData
           find Restore -name "*.dmg" -size +1G -delete 2>/dev/null || true
           rm -rf InfernoFSPatcher img4lib create_apticket.py
 
-      - name: Create InfernoData.zip
-        run: |
+          cd ..
           zip -r InfernoData.zip InfernoData
           echo "📦 Размер архива: $(du -h InfernoData.zip | cut -f1)"
-          unzip -l InfernoData.zip | grep -i "AppleSEPROM" || echo "⚠️ AppleSEPROM не найден в архиве"
+          unzip -l InfernoData.zip | grep -i "AppleSEPROM" || echo "⚠️ AppleSEPROM не найден"
 
+      # 11. АРТЕФАКТ
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -139,10 +209,3 @@ jobs:
           path: InfernoData.zip
           retention-days: 30
           if-no-files-found: error
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: InfernoData.zip
-          generate_release_notes: true
