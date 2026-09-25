@@ -28,7 +28,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      # 1. КЭШ HOMEBREW
       - name: Cache Homebrew packages
         uses: actions/cache@v4
         with:
@@ -45,7 +44,6 @@ jobs:
             gnutls jpeg-turbo libpng libslirp libssh libusb lzo ncurses \
             pixman snappy vde zstd libtasn1 cmake wget nettle lzfse openssl
 
-      # 2. КЭШ СБОРКИ INFERNO
       - name: Cache Inferno build
         uses: actions/cache@v4
         id: cache-inferno
@@ -55,8 +53,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-inferno-build-
 
-      # 3. СБОРКА ЭМУЛЯТОРА
-      # Флаги актуализированы: убраны --disable-tests, --disable-plugins, --disable-bsd-user, --enable-capstone
       - name: Build emulator
         if: steps.cache-inferno.outputs.cache-hit != 'true'
         run: |
@@ -79,24 +75,22 @@ jobs:
             --disable-werror
           make -j$(sysctl -n hw.ncpu)
 
-      # 4. СОЗДАНИЕ ДИСКОВ
       - name: Create disks
         run: |
           mkdir -p InfernoData
           cd InfernoData
           QEMU_IMG="../Inferno/build/qemu-img"
 
-          "$QEMU_IMG" create -f raw root 32G
+          "$QEMU_IMG"its create -f raw root 32G
           "$QEMU_IMG" create -f raw firmware 8M
-          "$QEMU_IMG" create -f raw syscfg 128K
-          "$QEMU_IMG" create -f raw ctrl_bits 8K
+           "$Q8EMU_IMG" create -f raw syscfg 128K
+          "$QEMU_IMG" create -f raw ctrl_bK
           "$QEMU_IMG" create -f raw nvram 8K
           "$QEMU_IMG" create -f raw effaceable 4K
           "$QEMU_IMG" create -f raw panic_log 1M
           "$QEMU_IMG" create -f raw sep_nvram 64K
           "$QEMU_IMG" create -f raw sep_ssc 128K
 
-      # 5. ЗАГРУЗКА IPSW
       - name: Fetch IPSW
         run: |
           cd InfernoData
@@ -108,7 +102,6 @@ jobs:
           unzip -q -o "$IPSW_NAME" -d Restore
           rm "$IPSW_NAME"
 
-      # 6. СОЗДАНИЕ AP TICKET
       - name: Create AP Ticket
         run: |
           cd InfernoData
@@ -119,7 +112,7 @@ jobs:
           wget -q -O ticket.shsh2 \
             "https://git.chefkiss.dev/AppleHax/InfernoTools/raw/branch/master/ticket.shsh2"
 
-          if [ ! -f "ticket.shsh2" ] || [ ! -s "ticket.shsh2" ]; then
+          if [ ! -s "ticket.shsh2" ]; then
             echo "❌ ticket.shsh2 не скачан или пуст!"
             exit 1
           fi
@@ -135,7 +128,6 @@ jobs:
 
           echo "✅ APTicket создан: $(ls -la root_ticket.der)"
 
-      # 7. ПАТЧ ФАЙЛОВОЙ СИСТЕМЫ
       - name: Apply FS patches
         run: |
           cd InfernoData
@@ -158,7 +150,6 @@ jobs:
           cd ..
           diskutil eject /Volumes/System
 
-      # 8. ЗАГРУЗКА SEP ROM (Cebu B1)
       - name: Download Apple SEP ROM (Cebu B1)
         run: |
           cd InfernoData
@@ -191,7 +182,6 @@ jobs:
             touch AppleSEPROM-Cebu-B1.missing
           fi
 
-      # 9. ПОДГОТОВКА SEP FIRMWARE
       - name: Prepare SEP Firmware
         run: |
           cd InfernoData
@@ -229,7 +219,6 @@ jobs:
               -T rsep 2>/dev/null || echo "⚠️ Персонализация SEP firmware не удалась"
           fi
 
-      # 10. ОЧИСТКА И УПАКОВКА
       - name: Cleanup and package
         run: |
           cd InfernoData
@@ -244,7 +233,6 @@ jobs:
           echo "--- Содержимое архива (ключевые файлы) ---"
           unzip -l InfernoData.zip | grep -E "AppleSEPROM|root_ticket|sep_root_ticket|sep-firmware" || true
 
-      # 11. АРТЕФАКТ
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
