@@ -41,7 +41,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install libtool meson ninja pkgconf capstone dtc glib \
+          brew install libtool meson ninja pkgconf dtc glib \
             gnutls jpeg-turbo libpng libslirp libssh libusb lzo ncurses \
             pixman snappy vde zstd libtasn1 cmake wget nettle lzfse
 
@@ -56,6 +56,7 @@ jobs:
             ${{ runner.os }}-inferno-build-
 
       # 3. СБОРКА ЭМУЛЯТОРА (если нет в кэше)
+      # Убраны --enable-capstone и --disable-bsd-user (удалены из Inferno)
       - name: Build emulator
         if: steps.cache-inferno.outputs.cache-hit != 'true'
         run: |
@@ -67,14 +68,16 @@ jobs:
           PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/opt/nettle/lib/pkgconfig" \
           LIBTOOL="glibtool" ../configure \
             --target-list=aarch64-softmmu,x86_64-softmmu \
-            --disable-guest-agent --enable-lzfse --enable-slirp --enable-capstone \
-            --enable-curses --enable-libssh --enable-virtfs --enable-zstd \
-            --extra-cflags=-DNCURSES_WIDECHAR=1 --disable-sdl --disable-gtk \
-            --enable-cocoa --enable-nettle --enable-gnutls \
-            --extra-cflags="-I/opt/homebrew/include -O3 -ffast-math" \
+            --disable-guest-agent \
+            --enable-lzfse --enable-slirp --enable-curses \
+            --enable-libssh --enable-virtfs --enable-zstd \
+            --extra-cflags=-DNCURSES_WIDECHAR=1 \
+            --disable-sdl --disable-gtk --enable-cocoa \
+            --enable-nettle --enable-gnutls \
+            --extra-cflags="-I/opt/homebrew/include" \
             --extra-ldflags="-L/opt/homebrew/lib" \
-            --disable-werror --disable-tests --disable-qom-cast-debug --disable-plugins
-          make -j$(sysctl -n hw.ncpu)
+            --disable-werror --disable-qom-cast-debug --disable-debug-info
+          ninja
 
       # 4. СОЗДАНИЕ ДИСКОВ
       - name: Create disks
